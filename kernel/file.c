@@ -89,7 +89,7 @@ filestat(struct file *f, uint64 addr)
 {
   struct proc *p = myproc();
   struct stat st;
-  
+
   if(f->type == FD_INODE || f->type == FD_DEVICE){
     ilock(f->ip);
     stati(f->ip, &st);
@@ -180,3 +180,18 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+
+// should be called with p->lock held
+int
+filecount(struct proc* p) {
+  acquire(&ftable.lock);
+  int files_count = 0;
+  for (int i = 0; i < NOFILE; i++) {
+    struct file* f = p->ofile[i];
+    if (f != 0 && f->type != FD_NONE) {
+      ++files_count;
+    }
+  }
+  release(&ftable.lock);
+  return files_count;
+}

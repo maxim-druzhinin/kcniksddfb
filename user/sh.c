@@ -143,17 +143,6 @@ getcmd(char *buf, int nbuf)
 }
 
 int
-readcmd(int fd, char *buf, int nbuf)
-{
-  memset(buf, 0, nbuf);
-  fgets(fd, buf, nbuf);
-  if(buf[0] == 0) // EOF
-    return -1;
-  return 0;
-}
-
-
-int
 main(void)
 {
   static char buf[100];
@@ -166,28 +155,6 @@ main(void)
       break;
     }
   }
-
-  if((fd = open(".profile", O_RDWR)) >= 0){
-    while (1) {
-      int s = readcmd(fd, buf, 100);
-
-      if(s != 0) {
-        break;
-      }
-
-      if(fork1() == 0) {
-        runcmd(parsecmd(buf));
-      }
-
-      int status = 0;
-      wait(&status);
-      if (status != 0) {
-        break;
-      }
-    }
-    close(fd);
-  }
-
 
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){

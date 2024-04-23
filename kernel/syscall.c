@@ -7,14 +7,6 @@
 #include "syscall.h"
 #include "defs.h"
 
-static uint64
-sys_poweroff(void)
-{
-  printf("Powering off...\n");
-  (*(volatile uint32 *) 0x100000) = 0x5555;
-  panic("poweroff");
-}
-
 // Fetch the uint64 at addr from the current process.
 int
 fetchaddr(uint64 addr, uint64 *ip)
@@ -109,6 +101,14 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
+extern uint64 sys_dummy(void);
+extern uint64 sys_ps_list(void);
+extern uint64 sys_ps_info(void);
+extern uint64 sys_ps_pt0(void);
+extern uint64 sys_ps_pt1(void);
+extern uint64 sys_ps_pt2(void);
+extern uint64 sys_ps_copy(void);
+extern uint64 sys_ps_sleep_write(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -134,7 +134,14 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
-[SYS_poweroff]   sys_poweroff,
+[SYS_dummy]   sys_dummy,
+[SYS_ps_list] sys_ps_list,
+[SYS_ps_info] sys_ps_info,
+[SYS_ps_pt0]  sys_ps_pt0,
+[SYS_ps_pt1]  sys_ps_pt1,
+[SYS_ps_pt2]  sys_ps_pt2,
+[SYS_ps_copy] sys_ps_copy,
+[SYS_ps_sleep_write] sys_ps_sleep_write,
 };
 
 void

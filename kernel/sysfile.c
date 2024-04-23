@@ -9,6 +9,7 @@
 #include "defs.h"
 #include "param.h"
 #include "stat.h"
+#include "process_info.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
@@ -64,6 +65,116 @@ sys_dup(void)
   filedup(f);
   return fd;
 }
+
+//  =======================  my own  =======================
+
+uint64
+sys_dummy(void)
+{
+  return 0x5555;
+}
+
+uint64
+sys_ps_list(void) {
+
+  int limit;
+  argint(0, &limit);
+  
+  uint64 pids;
+  argaddr(1, &pids);
+  
+  return handle_ps(limit, pids);
+}
+
+
+uint64
+sys_ps_info(void) {
+  int pid;
+  argint(0, &pid);
+  
+  uint64 psinfo;  // user pointer to struct process_info
+  argaddr(1, &psinfo);
+  
+  return handle_ps_info(pid, psinfo);
+}
+
+uint64
+sys_ps_pt0(void) { // int pid, uint64* table
+
+  int pid;
+  argint(0, &pid);
+  
+  uint64 table;  // user pointer to struct pagetable
+  argaddr(1, &table);
+  
+  return handle_ps_pt0(pid, table);
+}
+
+uint64
+sys_ps_pt1(void) {  // int pid, uint64* table, void* address
+
+  int pid;
+  argint(0, &pid);
+  
+  uint64 table;  // user pointer to struct pagetable
+  argaddr(1, &table);
+  
+  uint64 address;  // user pointer to address
+  argaddr(2, &address);
+  
+  return handle_ps_pt1(pid, table, address);
+}
+
+uint64
+sys_ps_pt2(void) {  // int pid, uint64* table, void* address
+
+  int pid;
+  argint(0, &pid);
+  
+  uint64 table;  // user pointer to struct pagetable
+  argaddr(1, &table);
+  
+  uint64 address;  // user pointer to address
+  argaddr(2, &address);
+  
+  return handle_ps_pt2(pid, table, address);
+}
+
+uint64
+sys_ps_copy(void) {  // int pid, void* addr, int size, void* data)
+    
+    int pid;
+    argint(0, &pid);
+    
+    uint64 addr;
+    argaddr(1, &addr);
+    
+    int size;
+    argint(2, &size);
+    
+    uint64 data;
+    argaddr(3, &data);
+    
+    return handle_ps_copy(pid, addr, size, data);
+
+}
+
+uint64
+sys_ps_sleep_write(void) {  // int pid, void* addr
+
+    int pid;
+    argint(0, &pid);
+    
+    uint64 addr;
+    argaddr(1, &addr);
+    
+    return handle_ps_sleep_write(pid, addr);
+
+}
+
+
+//  ========================================================
+
 
 uint64
 sys_read(void)

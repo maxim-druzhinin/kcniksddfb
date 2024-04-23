@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "process_info.h"
+#include "syscall.h"
 
 struct cpu cpus[NCPU];
 
@@ -55,6 +57,10 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      p->init_ticks = 0;
+      p->run_time = 0;               
+      p->last_run_start = 0;
+      p->context_switches = 0;
   }
 }
 
@@ -169,6 +175,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->init_ticks = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -250,6 +257,8 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  
+  p->init_ticks = sys_uptime();
 
   release(&p->lock);
 }
@@ -312,15 +321,16 @@ fork(void)
 
   pid = np->pid;
 
+  np->state = RUNNABLE;
+  np->init_ticks = sys_uptime();
+  np->run_time = 0;               
+  np->last_run_start = 0;
+  np->context_switches = 0;
   release(&np->lock);
-
+  
   acquire(&wait_lock);
   np->parent = p;
   release(&wait_lock);
-
-  acquire(&np->lock);
-  np->state = RUNNABLE;
-  release(&np->lock);
 
   return pid;
 }
@@ -376,6 +386,7 @@ exit(int status)
   acquire(&p->lock);
 
   p->xstate = status;
+
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -459,8 +470,13 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        
+        p->last_run_start = sys_uptime();
+        
         c->proc = p;
         swtch(&c->context, &p->context);
+        
+        p->context_switches++;
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -483,6 +499,10 @@ sched(void)
 {
   int intena;
   struct proc *p = myproc();
+  
+  if (p->state == SLEEPING || p->state == ZOMBIE) {
+    p->run_time += sys_uptime() - p->last_run_start;
+  }
 
   if(!holding(&p->lock))
     panic("sched p->lock");
@@ -548,7 +568,7 @@ sleep(void *chan, struct spinlock *lk)
   release(lk);
 
   // Go to sleep.
-  p->chan = chan;
+  p->chan = chan;  
   p->state = SLEEPING;
 
   sched();
@@ -681,3 +701,322 @@ procdump(void)
     printf("\n");
   }
 }
+
+// =================== ps count/list ===================
+int
+handle_ps(int limit, uint64 pids) {
+
+  if (limit == -1) {
+    int proc_cnt = 0;
+    for (struct proc* p = proc; p < &proc[NPROC]; p++) {
+      if (p->state != UNUSED)
+        ++proc_cnt;
+    }
+    return proc_cnt;
+    }
+
+  else {
+
+    int proc_cnt = 0;
+    for (struct proc* p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if (p->state != UNUSED) {
+        ++proc_cnt;
+        if (proc_cnt < limit) {
+          int success = copyout(myproc()->pagetable, pids + (proc_cnt - 1) * sizeof(int), (char*) &(p->pid), sizeof(int));
+          if (success != 0) {
+            release(&p->lock);
+            return -1;
+          }
+        }
+      }
+      release(&p->lock);
+    }
+    return proc_cnt;
+  }
+
+}
+
+// find process by its pid
+// returns struct proc* with proc->lock held, or 0 if pid was not found
+struct proc* find_proc_by_pid(int pid) {
+  for (struct proc* p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pid == pid) {
+      return p;
+    }
+    release(&p->lock);
+  }
+  return 0;
+}
+
+// =================== ps info ===================
+int handle_ps_info(int pid, uint64 psinfo) {
+
+  struct proc* pid_proc = find_proc_by_pid(pid);
+  if (pid_proc == 0) {
+    // pid was not found
+    return -1;
+  }
+
+  // state
+  uint64 ptr = psinfo;
+  enum procstate state = pid_proc->state;
+
+  if (state == UNUSED) {
+    release(&pid_proc->lock);
+    return -2;    // don't want to show rubbish about an unused process
+  }
+
+  static char *states[] = {
+      [UNUSED]    "unused",
+      [USED]      "used",
+      [SLEEPING]  "sleep ",
+      [RUNNABLE]  "runble",
+      [RUNNING]   "run   ",
+      [ZOMBIE]    "zombie"
+  };
+  char* state_str = states[state];
+  int success = copyout(myproc()->pagetable, ptr, state_str, sizeof(char) * STATE_SIZE);
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+
+  // parent_id
+  ptr += sizeof(char) * STATE_SIZE;
+
+  acquire(&wait_lock);
+
+  struct proc* parent = pid_proc->parent;
+  int parent_pid = 0;
+  if (parent != 0) {
+    acquire(&parent->lock);
+    parent_pid = parent->pid;
+    release(&parent->lock);
+  }
+
+  release(&wait_lock);
+
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &parent_pid, sizeof(int));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+  // mem_size
+  ptr += sizeof(int);
+  int mem_size = pid_proc->sz;
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &mem_size, sizeof(int));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+  // files_count
+  ptr += sizeof(int);
+
+  int files_count = filecount(pid_proc);
+  if (files_count == -1) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &files_count, sizeof(int));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+
+  // proc_name
+  ptr += sizeof(int);
+
+  char* proc_name = pid_proc->name;
+
+  success = copyout(myproc()->pagetable, ptr, proc_name, sizeof(char) * NAME_SIZE);
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+
+  // proc_ticks
+  ptr += sizeof(char) * NAME_SIZE;
+
+  uint proc_ticks = sys_uptime() - pid_proc->init_ticks;
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &proc_ticks, sizeof(uint));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+
+  // run_time
+  ptr += sizeof(uint);
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &(pid_proc->run_time), sizeof(uint));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+  // context_switches
+  ptr += sizeof(uint);
+
+  success = copyout(myproc()->pagetable, ptr, (char*) &(pid_proc->context_switches), sizeof(uint));
+  if (success != 0) {
+    release(&pid_proc->lock);
+    return -1;
+  }
+
+  release(&pid_proc->lock);
+  return 0;
+}
+
+
+#define PT_ENTRIES 512
+#define PT_SIZE 512 * sizeof(uint64)
+
+// =================== ps pt ===================
+int ps_pt(int pid, uint64 table, uint64 addr, uint64 level) {
+    
+    if (level > 2) return -1;
+    if (addr > MAXVA) return -1;
+    
+    struct proc *p = find_proc_by_pid(pid);  // -----------  locked  -----------
+    if (p == 0) {  // invalid pid
+      return -1;
+    }
+    
+    pagetable_t pagetable = p->pagetable;  // pagetable address
+    
+    level = 2 - level;  // numeration of pagetables is 2, 1, 0
+    for (int i = 2; i > level; --i) {
+        pte_t *pte = &pagetable[PX(i, addr)];   // pagetable entry of this address
+        if(*pte & PTE_V) {
+            pagetable = (pagetable_t)PTE2PA(*pte);  // next level pagetable
+        } else {
+            return -1;
+        }
+    }
+    
+    int success = copyout(myproc()->pagetable, table, (char*) pagetable, PT_SIZE);
+  
+    release(&p->lock);  // -----------  unlocked  -----------
+    return success;
+} 
+
+// =================== ps pt 0 ===================
+int handle_ps_pt0(int pid, uint64 table) {
+    return ps_pt(pid, table, 0, 0);
+}
+
+
+// =================== ps pt 1 ===================
+int handle_ps_pt1(int pid, uint64 table, uint64 address) {
+    return ps_pt(pid, table, address, 1);
+}
+
+
+// =================== ps pt 2 ===================
+int handle_ps_pt2(int pid, uint64 table, uint64 address) {
+    return ps_pt(pid, table, address, 2);
+}
+
+// =================== ps copy ===================
+int handle_ps_copy(int pid, uint64 addr, int size, uint64 data) {
+
+  struct proc *p = find_proc_by_pid(pid);  // -----------  locked  -----------
+  if (p == 0) {  // invalid pid
+    return -1;
+  }
+  
+  pagetable_t pagetable = p->pagetable;  // pagetable address
+  
+  uint64 pa = walkaddr(pagetable, addr);
+  
+  if (pa == 0) {  // not mapped address
+      release(&p->lock);  // -----------  unlocked  -----------
+      return -1;
+  }
+  
+  int success = copyout(myproc()->pagetable, data, (char*) pa, size);
+
+  release(&p->lock);  // -----------  unlocked  -----------
+  return success;
+}
+
+// =================== ps sleep-write ===================
+int handle_ps_sleep_write(int pid, uint64 addr) {
+    
+  int limit_buf = 1024; // simplified the task here
+
+  struct proc *p = find_proc_by_pid(pid);  // -----------  locked  -----------
+  if (p == 0) {  // invalid pid
+    return -2;
+  }
+  
+  enum procstate state = p->state;
+  if (state != SLEEPING) {
+      if (state == UNUSED) {
+        release(&p->lock);  // -----------  unlocked  -----------
+        return -3;
+      }
+      release(&p->lock);  // -----------  unlocked  -----------
+      return 0;
+  }
+
+  int syscall = p->trapframe->a7;
+  if (syscall == SYS_write) {  // write
+  
+    // file descriptor
+    int fd = p->trapframe->a0;  
+    int success = copyout(myproc()->pagetable, addr, (char*) &fd, sizeof(int));
+    if (success != 0) {
+      release(&p->lock);  // -----------  unlocked  -----------
+      return -1;
+    }
+    addr += sizeof(int);
+    
+    // file
+    struct file *f;  // file
+    if(fd < 0 || fd >= NOFILE || (f=p->ofile[fd]) == 0) {
+      release(&p->lock);  // -----------  unlocked  -----------
+      return -1;
+    }
+    
+    // buffer size
+    int buf_size = p->trapframe->a1;
+    if (buf_size > limit_buf) {
+        release(&p->lock);  // -----------  unlocked  -----------
+        return -1;
+    }
+    success = copyout(myproc()->pagetable, addr, (char*) &buf_size, sizeof(int));
+    if (success != 0) {
+      release(&p->lock);  // -----------  unlocked  -----------
+      return -1;
+    }
+    addr += sizeof(int);
+    
+    // pointer to buffer
+    uint64 ptr = p->trapframe->a2;
+    success = fileread(f, ptr, buf_size);
+    success = copyout(myproc()->pagetable, addr, (char*) &ptr, sizeof(char) * buf_size);
+    if (success != 0) {
+      release(&p->lock);  // -----------  unlocked  -----------
+      return -1;
+    }
+    
+  }
+  
+
+  release(&p->lock);  // -----------  unlocked  -----------
+  return syscall;
+}
+
+
